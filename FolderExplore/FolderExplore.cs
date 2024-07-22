@@ -14,6 +14,12 @@ namespace FolderExploring
             FullName = path;
         }
 
+        public FileEntry(string path, FileAttributes attributes)
+        {
+            FullName = path;
+            Attributes = attributes;
+        }
+
         public FileEntry() { }
         public string FullName { get; set; }
         public FileAttributes Attributes { get; set; }
@@ -36,7 +42,6 @@ namespace FolderExploring
         public static IEnumerable<FileEntry> EnumerateFileSystem(
             string path,
             string searchPattern = "*",
-            SearchOption searchOption = SearchOption.TopDirectoryOnly,
             SearchFor searchFor = SearchFor.Files,
             int deepnessLevel = -1,
             CancellationToken cancellationToken = default)
@@ -44,34 +49,15 @@ namespace FolderExploring
             ArgumentNullException.ThrowIfNull(path);
             ArgumentNullException.ThrowIfNull(searchPattern);
 
-            return new FileEnumerable(Path.GetFullPath(path), searchPattern, searchOption, searchFor, deepnessLevel, cancellationToken);
+            return new FileEnumerable(Path.GetFullPath(path), searchPattern, searchFor, deepnessLevel, cancellationToken);
         }
 
-        private class FileEnumerable : IEnumerable<FileEntry>
+        private class FileEnumerable(string path, string filter, SearchFor searchFor, int deepnessLevel, CancellationToken cancellationToken) : IEnumerable<FileEntry>
         {
-            private readonly string _path;
-            private readonly string _filter;
-            private readonly SearchOption _searchOption;
-            private readonly SearchFor _searchFor;
-            private readonly int _maxDegreeOfParallelism;
-            private readonly int _deepnessLevel;
-            private readonly CancellationToken _cancellationToken;
+            private readonly int _maxDegreeOfParallelism = (int)(Environment.ProcessorCount * 1.5);
+            private readonly int _deepnessLevel = deepnessLevel <= 0 ? -1 : deepnessLevel;
 
-            public FileEnumerable(string path, string filter, SearchOption searchOption, SearchFor searchFor, int deepnessLevel, CancellationToken cancellationToken)
-            {
-                _path = path;
-                _filter = filter;
-                _searchOption = searchOption;
-                _searchFor = searchFor;
-                _maxDegreeOfParallelism = (int)(Environment.ProcessorCount * 1.5);
-                _deepnessLevel = deepnessLevel <= 0 ? -1 : deepnessLevel;
-                _cancellationToken = cancellationToken;
-            }
-
-            public IEnumerator<FileEntry> GetEnumerator()
-            {
-                return new ParallelFileEnumerator(_path, _filter, _searchOption, _searchFor, _maxDegreeOfParallelism, _deepnessLevel, _cancellationToken);
-            }
+            public IEnumerator<FileEntry> GetEnumerator() => new ParallelFileEnumerator(path, filter, searchFor, _deepnessLevel, _maxDegreeOfParallelism, cancellationToken);
 
             IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
         }
@@ -91,26 +77,34 @@ namespace FolderExploring
 
         private class ParallelFileEnumerator : IEnumerator<FileEntry>
         {
+            #region Win32_API calls
+            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+            public static extern SafeFindHandle FindFirstFile(string fileName, [In, Out] WIN32_FIND_DATA data);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+            public static extern bool FindNextFile(SafeFindHandle hndFindFile, [In, Out, MarshalAs(UnmanagedType.LPStruct)] WIN32_FIND_DATA lpFindFileData);
+            #endregion
+
             private readonly string _initialPath;
             private readonly string _searchPattern;
-            private readonly SearchOption _searchOption;
             private readonly SearchFor _searchFor;
+            private readonly int _deepnessLevel;
             private readonly int _maxDegreeOfParallelism;
+
             private readonly CancellationToken _cancellationToken;
             private readonly ConcurrentStack<(string path, int depth)> _directoryStack;
             private readonly BlockingCollection<FileEntry> _resultQueue;
             private readonly ConcurrentDictionary<string, byte> _processedDirectories = new();
             private readonly ObjectPool<WIN32_FIND_DATA> _findDataPool;
-            private Task[] _producerTasks;
-            private bool _isCompleted;
-            private int _activeProducers;
-            private int _deepnessLevel;
 
-            public ParallelFileEnumerator(string path, string searchPattern, SearchOption searchOption, SearchFor searchFor, int maxDegreeOfParallelism, int deepnessLevel, CancellationToken cancellationToken)
+            private Task[] _producerTasks;
+            private bool _isCompleted { get; set; }
+            private int _activeProducers;
+
+            public ParallelFileEnumerator(string initialPath, string searchPattern, SearchFor searchFor, int deepnessLevel, int maxDegreeOfParallelism, CancellationToken cancellationToken)
             {
-                _initialPath = path;
+                _initialPath = initialPath;
                 _searchPattern = searchPattern;
-                _searchOption = searchOption;
                 _searchFor = searchFor;
                 _maxDegreeOfParallelism = maxDegreeOfParallelism;
                 _deepnessLevel = deepnessLevel;
@@ -123,11 +117,22 @@ namespace FolderExploring
                 StartProducerTasks();
             }
 
-            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-            public static extern SafeFindHandle FindFirstFile(string fileName, [In, Out] WIN32_FIND_DATA data);
-
-            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-            public static extern bool FindNextFile(SafeFindHandle hndFindFile, [In, Out, MarshalAs(UnmanagedType.LPStruct)] WIN32_FIND_DATA lpFindFileData);
+            private async Task MonitorAndAdjustConcurrency()
+            {
+                while (!_isCompleted)
+                {
+                    await Task.Delay(1000, _cancellationToken);
+                    if (_directoryStack.Count > _activeProducers * 2 && _activeProducers < Environment.ProcessorCount * 2)
+                    {
+                        Interlocked.Increment(ref _activeProducers);
+                        _producerTasks = _producerTasks.Concat(new[] { Task.Factory.StartNew(ProducerWork, _cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default) }).ToArray();
+                    }
+                    else if (_directoryStack.Count < _activeProducers / 2 && _activeProducers > _maxDegreeOfParallelism)
+                    {
+                        Interlocked.Decrement(ref _activeProducers);
+                    }
+                }
+            }
 
             private void StartProducerTasks()
             {
@@ -135,15 +140,13 @@ namespace FolderExploring
                 _activeProducers = _maxDegreeOfParallelism;
                 for (int i = 0; i < _maxDegreeOfParallelism; i++)
                 {
-                    _producerTasks[i] = Task.Run(ProducerWork, _cancellationToken);
+                    _producerTasks[i] = Task.Factory.StartNew(ProducerWork, _cancellationToken);
                 }
-
                 Task.Run(async () =>
                 {
                     try
                     {
                         await Task.WhenAll(_producerTasks);
-                        _resultQueue.CompleteAdding();
                     }
                     catch (OperationCanceledException)
                     {
@@ -156,8 +159,12 @@ namespace FolderExploring
                     finally
                     {
                         _isCompleted = true;
+                        _resultQueue.CompleteAdding();
                     }
                 });
+
+                Task.Run(MonitorAndAdjustConcurrency, _cancellationToken);
+
             }
 
             private void ProducerWork()
@@ -197,23 +204,17 @@ namespace FolderExploring
                 {
                     using var hFind = FindFirstFile(Path.Combine(path, _searchPattern), findData);
 
-                    if (hFind.IsInvalid)
-                    {
-                        Debug.WriteLine($"Failed to access directory: {path}");
-                        return;
-                    }
+                    if (hFind.IsInvalid) return;
+                    
 
                     do
                     {
                         _cancellationToken.ThrowIfCancellationRequested();
-
                         if (findData.cFileName is "." or ".." or "Thumbs.db") continue;
 
                         var fullPath = Path.Combine(path, findData.cFileName);
-                        var fileEntry = new FileEntry(fullPath)
-                        {
-                            Attributes = findData.dwFileAttributes,
-                        };
+                        var attributes = findData.dwFileAttributes;
+                        var fileEntry = new FileEntry(fullPath, attributes);
 
                         try
                         {
@@ -221,23 +222,17 @@ namespace FolderExploring
                         }
                         catch (Exception ex)
                         {
+                            Debug.WriteLine($"Error retrieving security info: {ex.Message}");
                             fileEntry.Error = $"Failed to retrieve security info: {ex.Message}";
                         }
 
-                        if (fileEntry.Attributes.HasFlag(FileAttributes.Directory))
+                        if (attributes.HasFlag(FileAttributes.Directory))
                         {
-                            if (_searchOption == SearchOption.AllDirectories)
-                            {
-                                _directoryStack.Push((fullPath, depth + 1));
-                            }
+                            if (_searchFor != SearchFor.Files) _resultQueue.Add(fileEntry);
+                            _directoryStack.Push((fullPath, depth + 1));
+                        }
+                        else if (_searchFor != SearchFor.Directories) _resultQueue.Add(fileEntry);
 
-                            if (_searchFor is SearchFor.Directories or SearchFor.FilesAndDirectories)
-                                _resultQueue.Add(fileEntry);
-                        }
-                        else if (_searchFor is SearchFor.Files or SearchFor.FilesAndDirectories)
-                        {
-                            _resultQueue.Add(fileEntry);
-                        }
                     }
                     while (FindNextFile(hFind, findData));
                 }
@@ -369,7 +364,6 @@ namespace FolderExploring
 
         #endregion
 
-        private static readonly ConcurrentDictionary<string, string> _ownerCache = [];
         private static readonly ConcurrentDictionary<IntPtr, string> _sidCache = [];
         private static readonly ObjectPool<StringBuilder> _stringBuilderPool = new(() => new StringBuilder(256), Environment.ProcessorCount * 2);
         private static readonly ObjectPool<List<AclEntry>> _aclListPool = new(() => [], Environment.ProcessorCount * 2);
@@ -426,7 +420,7 @@ namespace FolderExploring
         private static void ProcessAce(IntPtr pAce, List<AclEntry> aclList)
         {
             int mask = Marshal.ReadInt32(pAce, 4);
-            IntPtr pSid = new IntPtr(pAce.ToInt64() + 8);
+            IntPtr pSid = new(pAce.ToInt64() + 8);
             string sidString = GetSidString(pSid);
             string accessType = GetAccessType((uint)mask);
 
@@ -486,10 +480,29 @@ namespace FolderExploring
                 if (pSecurityDescriptor != IntPtr.Zero) LocalFree(pSecurityDescriptor);
             }
         }
-
-        // ... (Keep other methods of SecurityInfoRetriever)
     }
+    public class SecurityInfoCache
+    {
+        private readonly ConcurrentDictionary<string, (string Owner, List<AclEntry> ACL)> _cache = new();
 
+        public bool TryGetSecurityInfo(string path, out string owner, out List<AclEntry> acl)
+        {
+            if (_cache.TryGetValue(path, out var info))
+            {
+                owner = info.Owner;
+                acl = info.ACL;
+                return true;
+            }
+            owner = null;
+            acl = null;
+            return false;
+        }
+
+        public void AddSecurityInfo(string path, string owner, List<AclEntry> acl)
+        {
+            _cache[path] = (owner, acl);
+        }
+    }
 
     public enum SearchFor
     {
@@ -520,18 +533,10 @@ namespace FolderExploring
         public override string ToString() => "FileName = " + cFileName;
     }
 
-    public class ObjectPool<T> where T : class
+    public class ObjectPool<T>(Func<T> objectGenerator, int maxSize = int.MaxValue) where T : class
     {
-        private readonly Func<T> _objectGenerator;
-        private readonly ConcurrentBag<T> _objects;
-        private readonly int _maxSize;
-
-        public ObjectPool(Func<T> objectGenerator, int maxSize = int.MaxValue)
-        {
-            _objectGenerator = objectGenerator ?? throw new ArgumentNullException(nameof(objectGenerator));
-            _objects = new ConcurrentBag<T>();
-            _maxSize = maxSize;
-        }
+        private readonly Func<T> _objectGenerator = objectGenerator ?? throw new ArgumentNullException(nameof(objectGenerator));
+        private readonly ConcurrentBag<T> _objects = [];
 
         public T Rent()
         {
@@ -543,9 +548,7 @@ namespace FolderExploring
 
         public void Return(T item)
         {
-            if (_objects.Count < _maxSize)
-                _objects.Add(item);
+            if (_objects.Count < maxSize) _objects.Add(item);
         }
     }
-    // ... (Keep the ObjectPool class implementation)
 }

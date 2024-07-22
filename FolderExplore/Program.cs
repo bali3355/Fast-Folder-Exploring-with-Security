@@ -1,4 +1,5 @@
 ﻿using FolderExploring;
+using FastFileV5;
 using System.Diagnostics;
 
 namespace FastDirTest
@@ -30,10 +31,17 @@ namespace FastDirTest
             string header = $"| {"Enumerator name",-nameWidth} | {"Enumerating Time",-timeWidth} | {"Enumerated Count",-countWidth} |";
             Console.WriteLine(header);
             Console.WriteLine(new string('-', header.Length));
-
             stopwatch.Start();
-            var results = TestEnumeratingFiles(FolderExplore.EnumerateFileSystem(SearchPath, "*", SearchOption.AllDirectories, SearchFor.Files), "Search").ToList();
+            var resultsDefault = TestEnumeratingFiles(WinAPIv5.EnumerateFileSystem(SearchPath, "*", SearchOption.AllDirectories), "Search");
+            stopwatch.Start();
+            var results = TestEnumeratingFiles(FolderExplore.EnumerateFileSystem(SearchPath, "*", FolderExploring.SearchFor.Files), "Search");
             Console.WriteLine(new string('-', header.Length));
+            //var missing = results.Select(x => x.FullName).Except(resultsDefault.Select(x => x.FullName)).ToList();
+            //var duplicates = results.Select(x => x.FullName).GroupBy(x => x).Where(x => x.Count() > 1).Select(x => x.Key);
+            //Parallel.ForEach(missing, result =>
+            //{
+            //    Console.WriteLine(result);
+            //});
             Console.WriteLine("\n\nPress any key to exit...");
             Console.ReadKey();
             Parallel.ForEach(results, result =>
