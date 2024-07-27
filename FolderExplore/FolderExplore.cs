@@ -1,554 +1,286 @@
 ﻿using Microsoft.Win32.SafeHandles;
-using System.Collections;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
-namespace FolderExploring
+namespace FolderExplore
 {
-    public class FileEntry
+
+    internal class FolderExplore
     {
-        public FileEntry(string path)
-        {
-            FullName = path;
-        }
+        public static ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)> Results { get; set; } = [];
+        private static bool _isInherited;
+        private static bool _isOwner;
 
-        public FileEntry(string path, FileAttributes attributes)
-        {
-            FullName = path;
-            Attributes = attributes;
-        }
-
-        public FileEntry() { }
-        public string FullName { get; set; }
-        public FileAttributes Attributes { get; set; }
-        public string Owner { get; set; }
-        public List<AclEntry> ACL { get; set; } = [];
-        public string Error { get; set; }
-
-        public bool Exists => File.Exists(FullName);
-        public override string ToString() => FullName;
-    }
-
-    public class AclEntry
-    {
-        public string Identity { get; set; }
-        public string AccessType { get; set; }
-    }
-
-    public static class FolderExplore
-    {
-        public static IEnumerable<FileEntry> EnumerateFileSystem(
-            string path,
-            string searchPattern = "*",
-            SearchFor searchFor = SearchFor.Files,
-            int deepnessLevel = -1,
-            CancellationToken cancellationToken = default)
-        {
-            ArgumentNullException.ThrowIfNull(path);
-            ArgumentNullException.ThrowIfNull(searchPattern);
-
-            return new FileEnumerable(Path.GetFullPath(path), searchPattern, searchFor, deepnessLevel, cancellationToken);
-        }
-
-        private class FileEnumerable(string path, string filter, SearchFor searchFor, int deepnessLevel, CancellationToken cancellationToken) : IEnumerable<FileEntry>
-        {
-            private readonly int _maxDegreeOfParallelism = (int)(Environment.ProcessorCount * 1.5);
-            private readonly int _deepnessLevel = deepnessLevel <= 0 ? -1 : deepnessLevel;
-
-            public IEnumerator<FileEntry> GetEnumerator() => new ParallelFileEnumerator(path, filter, searchFor, _deepnessLevel, _maxDegreeOfParallelism, cancellationToken);
-
-            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
-        }
-
+        /// <summary>
+        /// Handle the file search
+        /// </summary>
         private sealed class SafeFindHandle : SafeHandleZeroOrMinusOneIsInvalid
         {
-            [DllImport("kernel32.dll")]
-            private static extern bool FindClose(IntPtr handle);
-
             internal SafeFindHandle() : base(true) { }
 
-            protected override bool ReleaseHandle()
-            {
-                return FindClose(handle);
-            }
+            protected override bool ReleaseHandle() => FindClose(handle);
+
+            [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+            private static extern bool FindClose(IntPtr handle);
         }
 
-        private class ParallelFileEnumerator : IEnumerator<FileEntry>
+        #region Import from kernel32
+
+        /// <summary>
+        /// Given struct to handle file information
+        /// </summary>
+        [Serializable, StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto), BestFitMapping(false)]
+        internal struct WIN32_FIND_DATA
         {
-            #region Win32_API calls
-            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-            public static extern SafeFindHandle FindFirstFile(string fileName, [In, Out] WIN32_FIND_DATA data);
+            public FileAttributes dwFileAttributes;
+            public uint ftCreationTime_dwLowDateTime;
+            public uint ftCreationTime_dwHighDateTime;
+            public uint ftLastAccessTime_dwLowDateTime;
+            public uint ftLastAccessTime_dwHighDateTime;
+            public uint ftLastWriteTime_dwLowDateTime;
+            public uint ftLastWriteTime_dwHighDateTime;
+            public uint nFileSizeHigh;
+            public uint nFileSizeLow;
+            public int dwReserved0;
+            public int dwReserved1;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string cFileName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
+            public string cAlternateFileName;
+        }
 
-            [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-            public static extern bool FindNextFile(SafeFindHandle hndFindFile, [In, Out, MarshalAs(UnmanagedType.LPStruct)] WIN32_FIND_DATA lpFindFileData);
-            #endregion
+        /// <summary>
+        /// You can find more information on <seealso href="https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew"/>
+        /// </summary>
+        /// <param name="lpFileName"></param>
+        /// <param name="lpFindFileData"></param>
+        /// <returns></returns>
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA lpFindFileData);
 
-            private readonly string _initialPath;
-            private readonly string _searchPattern;
-            private readonly SearchFor _searchFor;
-            private readonly int _deepnessLevel;
-            private readonly int _maxDegreeOfParallelism;
+        /// <summary>
+        /// You can find more information on <seealso href="https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew"/>
+        /// </summary>
+        /// <param name="hFindFile"></param>
+        /// <param name="lpFindFileData"></param>
+        /// <returns></returns>
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA lpFindFileData);
 
-            private readonly CancellationToken _cancellationToken;
-            private readonly ConcurrentStack<(string path, int depth)> _directoryStack;
-            private readonly BlockingCollection<FileEntry> _resultQueue;
-            private readonly ConcurrentDictionary<string, byte> _processedDirectories = new();
-            private readonly ObjectPool<WIN32_FIND_DATA> _findDataPool;
+        #endregion Import from kernel32
 
-            private Task[] _producerTasks;
-            private bool _isCompleted { get; set; }
-            private int _activeProducers;
+        /// <summary>
+        /// Main Search Function for retrieve access list for files
+        /// </summary>
+        /// <param name="path"></param>
+        /// <param name="isInherited"></param>
+        /// <param name="isOwner"></param>
+        /// <returns></returns>
+        public static ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)> Explore(string path, bool isInherited, bool isOwner)
+        {
+            _isInherited = isInherited;
+            _isOwner = isOwner;
+            GetFilesQueueParallel(path);
+            return Results;
+        }
 
-            public ParallelFileEnumerator(string initialPath, string searchPattern, SearchFor searchFor, int deepnessLevel, int maxDegreeOfParallelism, CancellationToken cancellationToken)
+        /// <summary>
+        /// Searches for files in a given directory
+        /// </summary>
+        /// <param name="path"></param>
+        public static void GetFilesQueueParallel(string path)
+        {
+            var folderQueue = new ConcurrentQueue<string>([path]);
+            while (!folderQueue.IsEmpty)
             {
-                _initialPath = initialPath;
-                _searchPattern = searchPattern;
-                _searchFor = searchFor;
-                _maxDegreeOfParallelism = maxDegreeOfParallelism;
-                _deepnessLevel = deepnessLevel;
-                _cancellationToken = cancellationToken;
-                _directoryStack = new ConcurrentStack<(string path, int depth)>();
-                _resultQueue = new BlockingCollection<FileEntry>(new ConcurrentQueue<FileEntry>());
-                _findDataPool = new ObjectPool<WIN32_FIND_DATA>(() => new WIN32_FIND_DATA(), maxSize: _maxDegreeOfParallelism * 2);
-
-                _directoryStack.Push((_initialPath, 0));
-                StartProducerTasks();
-            }
-
-            private async Task MonitorAndAdjustConcurrency()
-            {
-                while (!_isCompleted)
+                var tmpQueue = folderQueue;
+                folderQueue = [];
+                _ = Parallel.ForEach(tmpQueue, (currentPath) =>
                 {
-                    await Task.Delay(1000, _cancellationToken);
-                    if (_directoryStack.Count > _activeProducers * 2 && _activeProducers < Environment.ProcessorCount * 2)
+                    foreach (var subDir in DirectorySearch(currentPath, "*")) folderQueue.Enqueue(subDir);
+                    foreach (var subFile in FileSearch(currentPath, "*"))
                     {
-                        Interlocked.Increment(ref _activeProducers);
-                        _producerTasks = _producerTasks.Concat(new[] { Task.Factory.StartNew(ProducerWork, _cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default) }).ToArray();
-                    }
-                    else if (_directoryStack.Count < _activeProducers / 2 && _activeProducers > _maxDegreeOfParallelism)
-                    {
-                        Interlocked.Decrement(ref _activeProducers);
-                    }
-                }
-            }
-
-            private void StartProducerTasks()
-            {
-                _producerTasks = new Task[_maxDegreeOfParallelism];
-                _activeProducers = _maxDegreeOfParallelism;
-                for (int i = 0; i < _maxDegreeOfParallelism; i++)
-                {
-                    _producerTasks[i] = Task.Factory.StartNew(ProducerWork, _cancellationToken);
-                }
-                Task.Run(async () =>
-                {
-                    try
-                    {
-                        await Task.WhenAll(_producerTasks);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // Expected when cancellation is requested
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"Error in producer tasks: {ex}");
-                    }
-                    finally
-                    {
-                        _isCompleted = true;
-                        _resultQueue.CompleteAdding();
+                        foreach (var acl in SecurityFileInfo.GetInfo(new FileInfo(subFile), _isInherited, _isOwner)) 
+                            Results.Enqueue(acl);
                     }
                 });
-
-                Task.Run(MonitorAndAdjustConcurrency, _cancellationToken);
-
             }
-
-            private void ProducerWork()
-            {
-                try
-                {
-                    while (_directoryStack.TryPop(out var dirInfo))
-                    {
-                        ProcessDirectory(dirInfo.path, dirInfo.depth);
-                        if (_directoryStack.IsEmpty && _activeProducers == 1) break;
-                        if (_cancellationToken.IsCancellationRequested) break;
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    // Expected when cancellation is requested
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Error in producer work: {ex}");
-                }
-                finally
-                {
-                    if (Interlocked.Decrement(ref _activeProducers) == 0)
-                    {
-                        _resultQueue.CompleteAdding();
-                    }
-                }
-            }
-
-            private void ProcessDirectory(string path, int depth)
-            {
-                if (!_processedDirectories.TryAdd(path, 1)) return;
-                if (_deepnessLevel != -1 && depth >= _deepnessLevel) return;
-                var findData = _findDataPool.Rent();
-                try
-                {
-                    using var hFind = FindFirstFile(Path.Combine(path, _searchPattern), findData);
-
-                    if (hFind.IsInvalid) return;
-                    
-
-                    do
-                    {
-                        _cancellationToken.ThrowIfCancellationRequested();
-                        if (findData.cFileName is "." or ".." or "Thumbs.db") continue;
-
-                        var fullPath = Path.Combine(path, findData.cFileName);
-                        var attributes = findData.dwFileAttributes;
-                        var fileEntry = new FileEntry(fullPath, attributes);
-
-                        try
-                        {
-                            SecurityInfoRetriever.GetSecurityInfo(fileEntry);
-                        }
-                        catch (Exception ex)
-                        {
-                            Debug.WriteLine($"Error retrieving security info: {ex.Message}");
-                            fileEntry.Error = $"Failed to retrieve security info: {ex.Message}";
-                        }
-
-                        if (attributes.HasFlag(FileAttributes.Directory))
-                        {
-                            if (_searchFor != SearchFor.Files) _resultQueue.Add(fileEntry);
-                            _directoryStack.Push((fullPath, depth + 1));
-                        }
-                        else if (_searchFor != SearchFor.Directories) _resultQueue.Add(fileEntry);
-
-                    }
-                    while (FindNextFile(hFind, findData));
-                }
-                catch (OperationCanceledException)
-                {
-                    // Expected when cancellation is requested
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"Error processing directory {path}: {ex.Message}");
-                }
-                finally
-                {
-                    _findDataPool.Return(findData);
-                }
-            }
-
-            public bool MoveNext()
-            {
-                if (_isCompleted) return false;
-
-                try
-                {
-                    if (_resultQueue.TryTake(out var item, Timeout.Infinite, _cancellationToken))
-                    {
-                        Current = item;
-                        return true;
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    // Expected when cancellation is requested
-                }
-                catch (InvalidOperationException)
-                {
-                    // Queue is completed
-                }
-
-                _isCompleted = true;
-                return false;
-            }
-
-            public void Dispose()
-            {
-                _resultQueue.CompleteAdding();
-                Task.WaitAll(_producerTasks, TimeSpan.FromSeconds(30));
-                _resultQueue.Dispose();
-                _directoryStack.Clear();
-            }
-
-
-            public FileEntry Current { get; private set; }
-
-            object IEnumerator.Current => Current;
-
-            public void Reset() => throw new NotSupportedException();
         }
+        #region Search Types
+        /// <summary>
+        /// Searches for files in a given directory
+        /// </summary>
+        /// <param name="path"></param>
+        /// <param name="searchPattern"></param>
+        /// <returns></returns>
+        private static IEnumerable<string> FileSearch(string path, string searchPattern)
+        {
+            using var findHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA findData);
+            if (findHandle.IsInvalid) yield break;
+            do
+            {
+                if ((findData.dwFileAttributes & FileAttributes.Directory) != 0 || findData.cFileName == "thumbs.db") continue;
+                yield return Path.Combine(path, findData.cFileName);
+            } while (FindNextFileW(findHandle, out findData));
+        }
+
+        /// <summary>
+        /// Searches for folders in a given directory
+        /// </summary>
+        /// <param name="path"></param>
+        /// <param name="searchPattern"></param>
+        /// <returns></returns>
+        private static IEnumerable<string> DirectorySearch(string path, string searchPattern)
+        {
+            using var findHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA findData);
+            if (findHandle.IsInvalid) yield break;
+            do
+            {
+                if ((findData.dwFileAttributes & FileAttributes.Directory) == 0 || findData.cFileName is "." or "..") continue;
+                yield return Path.Combine(path, findData.cFileName);
+            } while (FindNextFileW(findHandle, out findData));
+        }
+        #endregion Search Types
     }
 
-    public static class SecurityInfoRetriever
+    public static class SecurityFileInfo
     {
-        #region Structures
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ACE_HEADER
+        private static bool _isInherited;
+        private static bool _isOwner;
+        private static Type _currentAccountType = typeof(NTAccount);
+
+        /// <summary>
+        /// Returns the access rules of a given <seealso cref="FileSystemInfo"/>
+        /// </summary>
+        /// <param name="path"></param>
+        /// <param name="inherited"></param>
+        /// <param name="owner"></param>
+        /// <returns> <seealso cref="ConcurrentBag{T}"/></returns>
+        public static ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)> GetInfo(FileSystemInfo path, bool inherited, bool owner)
         {
-            public byte AceType;
-            public byte AceFlags;
-            public ushort AceSize;
+            _isInherited = inherited;
+            _isOwner = owner;
+            _currentAccountType = typeof(NTAccount);
+            return GetInfo(path);
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct ACL_SIZE_INFORMATION
+        /// <summary>
+        /// Gets a path and returns a concurrent stack of ACL entries.
+        /// </summary>
+        /// <param name="path">Starting point with <seealso cref="fileSystemInfo"/></param>
+        /// <returns>Concurrent Stack of ACL entries</returns>
+        public static ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)> GetInfo(FileSystemInfo path)
         {
-            public uint AceCount;
-            public uint AclBytesInUse;
-            public uint AclBytesFree;
-        }
-
-        [Flags]
-        private enum SecurityInformation : uint
-        {
-            Owner = 0x00000001,
-            Group = 0x00000002,
-            Dacl = 0x00000004,
-            Sacl = 0x00000008
-        }
-
-        private enum SE_OBJECT_TYPE
-        {
-            SE_FILE_OBJECT = 1
-        }
-        #endregion
-
-        #region WinAPI Imports
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern uint GetNamedSecurityInfo(
-            string pObjectName,
-            SE_OBJECT_TYPE ObjectType,
-            SecurityInformation SecurityInfo,
-            out IntPtr pSidOwner,
-            out IntPtr pSidGroup,
-            out IntPtr pDacl,
-            out IntPtr pSacl,
-            out IntPtr pSecurityDescriptor);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool GetAclInformation(
-            IntPtr pAcl,
-            out ACL_SIZE_INFORMATION pAclInformation,
-            uint nAclInformationLength,
-            uint dwAclInformationClass);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool GetAce(IntPtr pAcl, uint dwAceIndex, out IntPtr pAce);
-
-        [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern bool LookupAccountSid(
-            string lpSystemName,
-            IntPtr Sid,
-            StringBuilder lpName,
-            ref uint cchName,
-            StringBuilder lpReferencedDomainName,
-            ref uint cchReferencedDomainName,
-            out int peUse);
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr LocalFree(IntPtr hMem);
-
-        #endregion
-
-        private static readonly ConcurrentDictionary<IntPtr, string> _sidCache = [];
-        private static readonly ObjectPool<StringBuilder> _stringBuilderPool = new(() => new StringBuilder(256), Environment.ProcessorCount * 2);
-        private static readonly ObjectPool<List<AclEntry>> _aclListPool = new(() => [], Environment.ProcessorCount * 2);
-
-        public static FileEntry GetFileInfo(string path)
-        {
-            var fileEntry = new FileEntry { FullName = path };
-
-            IntPtr pSecurityDescriptor = IntPtr.Zero;
-            var aclList = _aclListPool.Rent();
+            var securityResult = new ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)>();
+            AuthorizationRuleCollection? accessRules = null;
 
             try
             {
-                fileEntry.Attributes = File.GetAttributes(path);
+                accessRules = AccessRules(path, _currentAccountType);
+                if (accessRules == null) return [];
+                var owner = GetOwner(path, _currentAccountType);
 
-                uint result = GetNamedSecurityInfo(path, SE_OBJECT_TYPE.SE_FILE_OBJECT,
-                    SecurityInformation.Owner | SecurityInformation.Dacl,
-                    out IntPtr pSidOwner, out _, out IntPtr pDacl, out _, out pSecurityDescriptor);
+                if (accessRules.Count > 0)
+                {
 
-                if (result != 0) throw new Exception($"GetNamedSecurityInfo failed with error code: {result}");
+#pragma warning disable CA1416 // This call site is reachable on all platforms. 'FileSystemAccessRule' is only supported on: 'windows'.
 
-                fileEntry.Owner = GetSidString(pSidOwner);
-                ProcessAcl(pDacl, aclList);
+                    var rules = accessRules.Cast<FileSystemAccessRule>();
+                    Parallel.ForEach(rules.Distinct(), acl =>
+                                {
+                                    securityResult.Enqueue((path.FullName, acl.IdentityReference.Value, owner, acl.FileSystemRights.ToString(), string.Empty));
+                                });
 
-                fileEntry.ACL = aclList;
+#pragma warning restore CA1416 // This call site is reachable on all platforms. 'FileSystemAccessRule' is only supported on: 'windows'.
+
+                }
             }
             catch (Exception ex)
             {
-                // Handle or log the exception as needed
-                fileEntry.Owner = "";
-                fileEntry.ACL = [];
-                fileEntry.Error = ex.Message;
+                securityResult.Enqueue(ErrorHandler.HandleException(ex, path.FullName));
             }
-            finally
-            {
-                if (pSecurityDescriptor != IntPtr.Zero) LocalFree(pSecurityDescriptor);
-            }
-
-            return fileEntry;
+            return securityResult;
         }
 
-        private static void ProcessAcl(IntPtr pDacl, List<AclEntry> aclList)
+
+        /// <summary>
+        /// Returns the owner of a given <seealso cref="DirectoryInfo"/>
+        /// </summary>
+        /// <returns>The owner in string format.</returns>
+        public static string GetOwner(DirectoryInfo di, Type currentAccountType)
         {
-            if (pDacl == IntPtr.Zero) return;
-            if (!GetAclInformation(pDacl, out ACL_SIZE_INFORMATION aclInfo, (uint)Marshal.SizeOf(typeof(ACL_SIZE_INFORMATION)), 2)) return;
-
-            for (uint i = 0; i < aclInfo.AceCount; i++)
-            {
-                if (!GetAce(pDacl, i, out IntPtr pAce)) continue;
-                ProcessAce(pAce, aclList);
-            }
-        }
-
-        private static void ProcessAce(IntPtr pAce, List<AclEntry> aclList)
-        {
-            int mask = Marshal.ReadInt32(pAce, 4);
-            IntPtr pSid = new(pAce.ToInt64() + 8);
-            string sidString = GetSidString(pSid);
-            string accessType = GetAccessType((uint)mask);
-
-            aclList.Add(new AclEntry
-            {
-                Identity = sidString,
-                AccessType = accessType
-            });
-        }
-
-        private static string GetSidString(IntPtr pSid)
-        {
-            return _sidCache.GetOrAdd(pSid, sid =>
-            {
-                var name = _stringBuilderPool.Rent();
-                var domain = _stringBuilderPool.Rent();
-                try
-                {
-                    uint nameLen = 256, domainLen = 256;
-
-                    return LookupAccountSid(null, sid, name, ref nameLen, domain, ref domainLen, out int sidUse) ? $"{domain}\\{name}" : "-";
-                }
-                finally
-                {
-                    _stringBuilderPool.Return(name);
-                    _stringBuilderPool.Return(domain);
-                }
-            });
-        }
-
-        private static string GetAccessType(uint mask)
-        {
-            if ((mask & 0x1F01FF) == 0x1F01FF) return "Full Control";
-            if ((mask & 0x1301BF) == 0x1301BF) return "Modify";
-            if ((mask & 0x1201BF) == 0x1201BF) return "Write";
-            if ((mask & 0x1200A9) == 0x1200A9) return "Read";
-            return "Special";
-        }
-
-        public static void GetSecurityInfo(FileEntry fileEntry)
-        {
-            IntPtr pSecurityDescriptor = IntPtr.Zero;
-
             try
             {
-                uint result = GetNamedSecurityInfo(fileEntry.FullName, SE_OBJECT_TYPE.SE_FILE_OBJECT,
-                    SecurityInformation.Owner | SecurityInformation.Dacl,
-                    out IntPtr pSidOwner, out _, out IntPtr pDacl, out _, out pSecurityDescriptor);
-
-                if (result != 0) throw new Exception($"GetNamedSecurityInfo failed with error code: {result}");
-
-                fileEntry.Owner = GetSidString(pSidOwner);
-                ProcessAcl(pDacl, fileEntry.ACL);
+                var owner = di.GetAccessControl().GetOwner(currentAccountType);
+                return owner == null ? "Missing Owner" : owner.ToString();
             }
-            finally
+            catch (IdentityNotMappedException)
             {
-                if (pSecurityDescriptor != IntPtr.Zero) LocalFree(pSecurityDescriptor);
+                return "Owner ID unrecognised";
             }
         }
-    }
-    public class SecurityInfoCache
-    {
-        private readonly ConcurrentDictionary<string, (string Owner, List<AclEntry> ACL)> _cache = new();
 
-        public bool TryGetSecurityInfo(string path, out string owner, out List<AclEntry> acl)
+        /// <summary>
+        /// Returns the owner of a given <seealso cref="FileInfo"/>
+        /// </summary>
+        /// <returns></returns>
+        public static string GetOwner(FileInfo fi, Type currentAccountType)
         {
-            if (_cache.TryGetValue(path, out var info))
+            try
             {
-                owner = info.Owner;
-                acl = info.ACL;
-                return true;
+                var owner = fi.GetAccessControl().GetOwner(currentAccountType);
+                return owner == null ? "Missing Owner" : owner.ToString();
             }
-            owner = null;
-            acl = null;
-            return false;
+            catch (IdentityNotMappedException)
+            {
+                return "Owner ID unrecognised";
+            }
         }
 
-        public void AddSecurityInfo(string path, string owner, List<AclEntry> acl)
+        /// <summary>
+        /// Returns the access rules of a given <seealso cref="FileSystemInfo"/>
+        /// </summary>
+        /// <param name="fileSystemInfo"></param>
+        /// <param name="currentAccountType"></param>
+        /// <returns> <seealso cref="AuthorizationRuleCollection"/></returns>
+        public static AuthorizationRuleCollection? AccessRules(FileSystemInfo fileSystemInfo, Type currentAccountType)
         {
-            _cache[path] = (owner, acl);
+            if (fileSystemInfo is DirectoryInfo directoryInfo) return directoryInfo.GetAccessControl().GetAccessRules(true, _isInherited, currentAccountType);
+            else if (fileSystemInfo is FileInfo fileInfo) return fileInfo.GetAccessControl().GetAccessRules(true, _isInherited, currentAccountType);
+            return null;
+        }
+
+        /// <summary>
+        /// Returns the owner of a given <seealso cref="FileSystemInfo"/>
+        /// </summary>
+        /// <param name="fileSystemInfo"></param>
+        /// <param name="currentAccountType"></param>
+        /// <returns> <seealso cref="string"/></returns>
+        public static string GetOwner(FileSystemInfo fileSystemInfo, Type currentAccountType)
+        {
+            if (!_isOwner) return string.Empty;
+            if (fileSystemInfo is DirectoryInfo directoryInfo) return GetOwner(directoryInfo, currentAccountType);
+            else if (fileSystemInfo is FileInfo fileInfo) GetOwner(fileInfo, currentAccountType);
+            return string.Empty;
         }
     }
 
-    public enum SearchFor
+    public static class ErrorHandler
     {
-        Files = 0,
-        Directories = 1,
-        FilesAndDirectories = 2,
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-    internal class WIN32_FIND_DATA
-    {
-        public FileAttributes dwFileAttributes;
-        public uint ftCreationTime_dwLowDateTime;
-        public uint ftCreationTime_dwHighDateTime;
-        public uint ftLastAccessTime_dwLowDateTime;
-        public uint ftLastAccessTime_dwHighDateTime;
-        public uint ftLastWriteTime_dwLowDateTime;
-        public uint ftLastWriteTime_dwHighDateTime;
-        public uint nFileSizeHigh;
-        public uint nFileSizeLow;
-        public int dwReserved0;
-        public int dwReserved1;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-        public string cFileName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
-        public string cAlternateFileName;
-
-        public override string ToString() => "FileName = " + cFileName;
-    }
-
-    public class ObjectPool<T>(Func<T> objectGenerator, int maxSize = int.MaxValue) where T : class
-    {
-        private readonly Func<T> _objectGenerator = objectGenerator ?? throw new ArgumentNullException(nameof(objectGenerator));
-        private readonly ConcurrentBag<T> _objects = [];
-
-        public T Rent()
+        public static (string FullName, string Identity, string Owner, string Rights, string ErrorMessage) HandleException(Exception ex, string fullName)
         {
-            if (_objects.TryTake(out T item))
-                return item;
-
-            return _objectGenerator();
-        }
-
-        public void Return(T item)
-        {
-            if (_objects.Count < maxSize) _objects.Add(item);
+            string errorMessage = ex switch
+            {
+                UnauthorizedAccessException _ => "Authority level too low to check ACLs",
+                PathTooLongException _ => "Path too long",
+                DirectoryNotFoundException _ or FileNotFoundException _ => "Path not found",
+                IOException _ => "IO Error happened",
+                _ => "Unknown Error"
+            };
+            return (fullName, string.Empty, string.Empty, string.Empty, errorMessage);
         }
     }
 }

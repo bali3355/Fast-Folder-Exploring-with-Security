@@ -1,8 +1,6 @@
-﻿using FolderExploring;
-using FastFileV5;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
-namespace FastDirTest
+namespace FolderExplore
 {
     public static class StopwatchExtensions
     {
@@ -32,9 +30,7 @@ namespace FastDirTest
             Console.WriteLine(header);
             Console.WriteLine(new string('-', header.Length));
             stopwatch.Start();
-            var resultsDefault = TestEnumeratingFiles(WinAPIv5.EnumerateFileSystem(SearchPath, "*", SearchOption.AllDirectories), "Search");
-            stopwatch.Start();
-            var results = TestEnumeratingFiles(FolderExplore.EnumerateFileSystem(SearchPath, "*", FolderExploring.SearchFor.Files), "Search");
+            TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
             Console.WriteLine(new string('-', header.Length));
             //var missing = results.Select(x => x.FullName).Except(resultsDefault.Select(x => x.FullName)).ToList();
             //var duplicates = results.Select(x => x.FullName).GroupBy(x => x).Where(x => x.Count() > 1).Select(x => x.Key);
@@ -43,11 +39,6 @@ namespace FastDirTest
             //    Console.WriteLine(result);
             //});
             Console.WriteLine("\n\nPress any key to exit...");
-            Console.ReadKey();
-            Parallel.ForEach(results, result =>
-            {
-                Console.WriteLine(result.FullName);
-            });
             Console.ReadKey();
 
         }
