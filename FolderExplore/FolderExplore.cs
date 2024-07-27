@@ -9,7 +9,7 @@ namespace FolderExplore
 
     internal class FolderExplore
     {
-        public static ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)> Results { get; set; } = [];
+        public static ConcurrentQueue<(string FullPath, string Identity, string Owner, string Rights, string ErrorMessage)> Results { get; set; } = [];
         private static bool _isInherited;
         private static bool _isOwner;
 
@@ -78,12 +78,13 @@ namespace FolderExplore
         /// <param name="isInherited"></param>
         /// <param name="isOwner"></param>
         /// <returns></returns>
-        public static ConcurrentQueue<(string FullName, string Identity, string Owner, string Rights, string ErrorMessage)> Explore(string path, bool isInherited, bool isOwner)
+        public static IEnumerable<(string FullPath, string Identity, string Owner, string Rights, string ErrorMessage)> Explore(string path, bool isInherited, bool isOwner)
         {
             _isInherited = isInherited;
             _isOwner = isOwner;
             GetFilesQueueParallel(path);
-            return Results;
+            return Results.GroupBy(r => new { r.FullPath, r.Identity })
+            .Select(g => g.First());
         }
 
         /// <summary>
