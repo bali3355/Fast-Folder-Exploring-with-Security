@@ -31,6 +31,8 @@ namespace FolderExplore
             Console.WriteLine(new string('-', header.Length));
             stopwatch.Start();
             TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
+            stopwatch.Start();
+            TestEnumeratingFiles(FolderExplore2.Start(SearchPath, false, true, true), "Folder.EnumerateFiles");
             Console.WriteLine(new string('-', header.Length));
             //var missing = results.Select(x => x.FullName).Except(resultsDefault.Select(x => x.FullName)).ToList();
             //var duplicates = results.Select(x => x.FullName).GroupBy(x => x).Where(x => x.Count() > 1).Select(x => x.Key);
