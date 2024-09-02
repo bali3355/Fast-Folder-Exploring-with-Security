@@ -1,5 +1,5 @@
-﻿using Microsoft.Win32.SafeHandles;
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -16,40 +16,7 @@ namespace FolderExplore
         /// <summary>
         /// Handle the file search
         /// </summary>
-        private sealed class SafeFindHandle : SafeHandleZeroOrMinusOneIsInvalid
-        {
-            internal SafeFindHandle() : base(true) { }
-
-            protected override bool ReleaseHandle() => FindClose(handle);
-
-            [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-            private static extern bool FindClose(IntPtr handle);
-        }
-
         #region Import from kernel32
-
-        /// <summary>
-        /// Given struct to handle file information
-        /// </summary>
-        [Serializable, StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto), BestFitMapping(false)]
-        internal struct WIN32_FIND_DATA
-        {
-            public FileAttributes dwFileAttributes;
-            public uint ftCreationTime_dwLowDateTime;
-            public uint ftCreationTime_dwHighDateTime;
-            public uint ftLastAccessTime_dwLowDateTime;
-            public uint ftLastAccessTime_dwHighDateTime;
-            public uint ftLastWriteTime_dwLowDateTime;
-            public uint ftLastWriteTime_dwHighDateTime;
-            public uint nFileSizeHigh;
-            public uint nFileSizeLow;
-            public int dwReserved0;
-            public int dwReserved1;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-            public string cFileName;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
-            public string cAlternateFileName;
-        }
 
         /// <summary>
         /// You can find more information on <seealso href="https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew"/>
@@ -83,8 +50,7 @@ namespace FolderExplore
             _isInherited = isInherited;
             _isOwner = isOwner;
             GetFilesQueueParallel(path);
-            return Results.GroupBy(r => new { r.FullPath, r.Identity })
-            .Select(g => g.First());
+            return Results;
         }
 
         /// <summary>
@@ -109,7 +75,7 @@ namespace FolderExplore
                 });
             }
         }
-        #region Search Types
+          #region Search Types
         /// <summary>
         /// Searches for files in a given directory
         /// </summary>
@@ -205,68 +171,31 @@ namespace FolderExplore
             }
             return securityResult;
         }
-
-
-        /// <summary>
-        /// Returns the owner of a given <seealso cref="DirectoryInfo"/>
-        /// </summary>
-        /// <returns>The owner in string format.</returns>
-        public static string GetOwner(DirectoryInfo di, Type currentAccountType)
-        {
-            try
-            {
-                var owner = di.GetAccessControl().GetOwner(currentAccountType);
-                return owner == null ? "Missing Owner" : owner.ToString();
-            }
-            catch (IdentityNotMappedException)
-            {
-                return "Owner ID unrecognised";
-            }
-        }
-
-        /// <summary>
-        /// Returns the owner of a given <seealso cref="FileInfo"/>
-        /// </summary>
-        /// <returns></returns>
-        public static string GetOwner(FileInfo fi, Type currentAccountType)
-        {
-            try
-            {
-                var owner = fi.GetAccessControl().GetOwner(currentAccountType);
-                return owner == null ? "Missing Owner" : owner.ToString();
-            }
-            catch (IdentityNotMappedException)
-            {
-                return "Owner ID unrecognised";
-            }
-        }
-
-        /// <summary>
-        /// Returns the access rules of a given <seealso cref="FileSystemInfo"/>
-        /// </summary>
-        /// <param name="fileSystemInfo"></param>
-        /// <param name="currentAccountType"></param>
-        /// <returns> <seealso cref="AuthorizationRuleCollection"/></returns>
-        public static AuthorizationRuleCollection? AccessRules(FileSystemInfo fileSystemInfo, Type currentAccountType)
-        {
-            if (fileSystemInfo is DirectoryInfo directoryInfo) return directoryInfo.GetAccessControl().GetAccessRules(true, _isInherited, currentAccountType);
-            else if (fileSystemInfo is FileInfo fileInfo) return fileInfo.GetAccessControl().GetAccessRules(true, _isInherited, currentAccountType);
-            return null;
-        }
-
-        /// <summary>
-        /// Returns the owner of a given <seealso cref="FileSystemInfo"/>
-        /// </summary>
-        /// <param name="fileSystemInfo"></param>
-        /// <param name="currentAccountType"></param>
-        /// <returns> <seealso cref="string"/></returns>
-        public static string GetOwner(FileSystemInfo fileSystemInfo, Type currentAccountType)
+        public static string GetOwner(FileSystemInfo fsi, Type currentAccountType)
         {
             if (!_isOwner) return string.Empty;
-            if (fileSystemInfo is DirectoryInfo directoryInfo) return GetOwner(directoryInfo, currentAccountType);
-            else if (fileSystemInfo is FileInfo fileInfo) GetOwner(fileInfo, currentAccountType);
-            return string.Empty;
+            try
+            {
+                IdentityReference? owner = GetOwnerSwitch(fsi, currentAccountType);
+                return owner == null ? "Missing Owner" : owner.ToString();
+            }
+            catch (IdentityNotMappedException)
+            {
+                return "Owner Sid unrecognized";
+            }
         }
+        private static IdentityReference? GetOwnerSwitch(FileSystemInfo fsi, Type currentAccountType) => fsi switch
+        {
+            DirectoryInfo di => di.GetAccessControl().GetOwner(currentAccountType),
+            FileInfo fi => fi.GetAccessControl().GetOwner(currentAccountType),
+            _ => null
+        };
+        public static AuthorizationRuleCollection? AccessRules(FileSystemInfo fileSystemInfo, Type currentAccountType) => fileSystemInfo switch
+        {
+            DirectoryInfo di => di.GetAccessControl().GetAccessRules(true, _isInherited, currentAccountType),
+            FileInfo fi => fi.GetAccessControl().GetAccessRules(true, _isInherited, currentAccountType),
+            _ => null
+        };
     }
 
     public static class ErrorHandler

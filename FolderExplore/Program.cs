@@ -29,10 +29,12 @@ namespace FolderExplore
             string header = $"| {"Enumerator name",-nameWidth} | {"Enumerating Time",-timeWidth} | {"Enumerated Count",-countWidth} |";
             Console.WriteLine(header);
             Console.WriteLine(new string('-', header.Length));
+            //stopwatch.Start();
+            //TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, false), "Folder.EnumerateFiles");
             stopwatch.Start();
-            TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
+            TestEnumeratingFiles(FolderTraversalCore.GetFiles(SearchPath), "FolderTraversalCore.GetFiles");
             stopwatch.Start();
-            TestEnumeratingFiles(FolderExplore2.Start(SearchPath, false, true, true), "Folder.EnumerateFiles");
+            TestEnumeratingFiles(FolderTraversalCore.Start(SearchPath, SearchFor.Files, true, false), "FolderTraversalCore.Start");
             Console.WriteLine(new string('-', header.Length));
             //var missing = results.Select(x => x.FullName).Except(resultsDefault.Select(x => x.FullName)).ToList();
             //var duplicates = results.Select(x => x.FullName).GroupBy(x => x).Where(x => x.Count() > 1).Select(x => x.Key);
