@@ -1,5 +1,4 @@
 ﻿using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -25,7 +24,7 @@ namespace FolderExplore
         /// <param name="lpFindFileData"></param>
         /// <returns></returns>
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA lpFindFileData);
+        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA_STRUCT lpFindFileData);
 
         /// <summary>
         /// You can find more information on <seealso href="https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilew"/>
@@ -34,7 +33,7 @@ namespace FolderExplore
         /// <param name="lpFindFileData"></param>
         /// <returns></returns>
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA lpFindFileData);
+        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA_STRUCT lpFindFileData);
 
         #endregion Import from kernel32
 
@@ -84,7 +83,7 @@ namespace FolderExplore
         /// <returns></returns>
         private static IEnumerable<string> FileSearch(string path, string searchPattern)
         {
-            using var findHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA findData);
+            using var findHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA_STRUCT findData);
             if (findHandle.IsInvalid) yield break;
             do
             {
@@ -101,7 +100,7 @@ namespace FolderExplore
         /// <returns></returns>
         private static IEnumerable<string> DirectorySearch(string path, string searchPattern)
         {
-            using var findHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA findData);
+            using var findHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA_STRUCT findData);
             if (findHandle.IsInvalid) yield break;
             do
             {

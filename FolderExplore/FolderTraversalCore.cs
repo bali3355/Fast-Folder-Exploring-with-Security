@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.AccessControl;
@@ -18,31 +19,38 @@ namespace FolderExplore
         #region Methods for reading files and directories from WinAPI32
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA lpFindFileData);
+        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA_STRUCT lpFindFileData);
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA lpFindFileData);
+        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA_STRUCT lpFindFileData);
 
-        private static IEnumerable<(string path, WIN32_FIND_DATA findData)> CallEnumerateFile(string path, string searchPattern)
+        private static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> CallEnumerateFile(string path, string searchPattern)
         {
-            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA _findData);
+            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA_STRUCT _findData);
             if (safeFindHandle.IsInvalid) yield break;
             do
             {
-                if ((_findData.dwFileAttributes & FileAttributes.Directory) != 0 || _findData.cFileName == "thumbs.db") continue;
+                if ((_findData.dwFileAttributes & FileAttributes.Directory) != 0 || IsToLeftOut(_findData.cFileName)) continue;
                 yield return (Path.Combine(path, _findData.cFileName), _findData);
             } while (FindNextFileW(safeFindHandle, out _findData));
         }
-        private static IEnumerable<(string path, WIN32_FIND_DATA findData)> CallEnumerateDirectory(string path, string searchPattern)
+        private static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> CallEnumerateDirectory(string path, string searchPattern)
         {
-            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA _findData);
+            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA_STRUCT _findData);
             if (safeFindHandle.IsInvalid) yield break;
             do
             {
-                if ((_findData.dwFileAttributes & FileAttributes.Directory) == 0 || _findData.cFileName is "." or "..") continue;
+                if ((_findData.dwFileAttributes & FileAttributes.Directory) == 0 || IsToLeftOut(_findData.cFileName)) continue;
                 yield return (Path.Combine(path, _findData.cFileName), _findData);
             } while (FindNextFileW(safeFindHandle, out _findData));
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool IsToLeftOut(string fileName) => fileName switch
+        {
+            "." or ".." or "Thumbs.db" => true,
+            _ => false
+        };
 
         #endregion
 
@@ -54,14 +62,14 @@ namespace FolderExplore
         /// <param name="path"></param>
         /// <param name="searchPattern"></param>
         /// <returns></returns>
-        public static IEnumerable<(string path, WIN32_FIND_DATA findData)> EnumerateFiles(string path, string searchPattern) => CallEnumerateFile(path, searchPattern);
+        public static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> EnumerateFiles(string path, string searchPattern) => CallEnumerateFile(path, searchPattern);
         /// <summary>
         /// Searches for subdirectories in a specified path. Leave out reparse points and stop when all files have been found.
         /// </summary>
         /// <param name="path"></param>
         /// <param name="searchPattern"></param>
         /// <returns></returns>
-        public static IEnumerable<(string path, WIN32_FIND_DATA findData)> EnumerateDirectory(string path, string searchPattern) => CallEnumerateDirectory(path, searchPattern);
+        public static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> EnumerateDirectory(string path, string searchPattern) => CallEnumerateDirectory(path, searchPattern);
 
         #endregion
 
@@ -73,15 +81,14 @@ namespace FolderExplore
             _SearchFor = searchFor;
             return GetFileSystemEntries(path);
         }
-        public static ConcurrentBag<string> GetFiles(string path, SearchFor searchFor = SearchFor.Files)
+        public static IEnumerable<string> GetFiles(string path, SearchFor searchFor = SearchFor.Files)
         {
             _SearchFor = _SearchFor ?? searchFor;
             try
             {
-                var searchResults = new ConcurrentBag<string>();
                 var folderQueue = new ConcurrentQueue<string>([path]);
-                while (!folderQueue.IsEmpty) folderQueue = InternalGetFiles(searchResults, folderQueue);
-                return searchResults;
+                while (!folderQueue.IsEmpty) folderQueue = InternalGetFiles(folderQueue);
+                return ConcurrentResultsString;
             }
             finally
             {
@@ -91,7 +98,7 @@ namespace FolderExplore
             }
         }
 
-        private static ConcurrentQueue<string> InternalGetFiles(ConcurrentBag<string> searchResults, ConcurrentQueue<string> folderQueue)
+        private static ConcurrentQueue<string> InternalGetFiles(ConcurrentQueue<string> folderQueue)
         {
             var tmpQueue = folderQueue;
             folderQueue = [];
@@ -99,10 +106,10 @@ namespace FolderExplore
             {
                 foreach (var subDir in EnumerateDirectory(currentPath, "*"))
                 {
-                    if (_SearchFor != SearchFor.Files) searchResults.Add(subDir.path);
+                    if (_SearchFor != SearchFor.Files) ConcurrentResultsString.Enqueue(subDir.path);
                     folderQueue.Enqueue(subDir.path);
                 }
-                if (_SearchFor != SearchFor.Directories) foreach (var subFile in EnumerateFiles(currentPath, "*")) searchResults.Add(subFile.path);
+                if (_SearchFor != SearchFor.Directories) foreach (var subFile in EnumerateFiles(currentPath, "*")) ConcurrentResultsString.Enqueue(subFile.path);
             });
             return folderQueue;
         }
@@ -133,20 +140,20 @@ namespace FolderExplore
                     foreach (var (dirPath, dirFindData) in EnumerateDirectory(currentDirectory, "*"))
                     {
                         folderQueue.Enqueue(dirPath);
-                        if (_SearchFor != SearchFor.Files) ConcurrentResults.Enqueue(CreateFileSystemEntry(new DirectoryInfo(dirPath), dirFindData));
+                        if (_SearchFor != SearchFor.Files) ConcurrentResults.Enqueue(CreateFileSystemEntry(new DirectoryInfo(dirPath), dirFindData.dwFileAttributes));
                     }
                     if (_SearchFor != SearchFor.Directories)
                     {
                         foreach (var (filePath, fileFindData) in EnumerateFiles(currentDirectory, "*"))
                         {
-                            ConcurrentResults.Enqueue(CreateFileSystemEntry(new FileInfo(filePath), fileFindData));
+                            ConcurrentResults.Enqueue(CreateFileSystemEntry(new FileInfo(filePath), fileFindData.dwFileAttributes));
                         }
                     }
                 });
             return folderQueue;
         }
 
-        private static FileSystemEntry CreateFileSystemEntry(FileSystemInfo fsi, WIN32_FIND_DATA findData)
+        private static FileSystemEntry CreateFileSystemEntry(FileSystemInfo fsi, FileAttributes fileAttributes)
         {
             try
             {
@@ -157,7 +164,7 @@ namespace FolderExplore
                 return FileSystemEntry.Create(
                     fsi.FullName,
                     owner,
-                    findData.dwFileAttributes,
+                    fileAttributes,
                     accessRules,
                     true,
                     string.Empty
@@ -192,7 +199,6 @@ namespace FolderExplore
         }
         public static string GetOwner(FileSystemInfo fsi, Type currentAccountType)
         {
-            if (!IsOwner) return string.Empty;
             try
             {
                 IdentityReference? owner = GetOwnerSwitch(fsi, currentAccountType);
