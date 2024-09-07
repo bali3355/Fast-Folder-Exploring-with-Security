@@ -15,7 +15,7 @@ namespace FolderExplore
     }
     internal class Program
     {
-        internal const int nameWidth = 30, timeWidth = 30, countWidth = 30;
+        internal const int nameWidth = 50, timeWidth = 30, countWidth = 30;
         internal static Stopwatch stopwatch = new();
         internal static int Count { get; set; }
         internal static string SearchPath { get; } = @"C:\";
@@ -32,19 +32,12 @@ namespace FolderExplore
             stopwatch.Start();
             TestEnumeratingFiles(FolderTraversalCore.GetFiles(SearchPath), "GetFiles - Normal without anything");
             stopwatch.Start();
-            TestEnumeratingFiles(FolderTraversalCore2.EnumerateFileSystem(SearchPath), "FolderTraversalCore2.EnumerateFileSystem");
-            stopwatch.Start();
-            TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
+            TestEnumeratingFiles(FolderTraversalCore2.EnumerateFileSystem(SearchPath, "*", SearchFor.Files, -1,true,true), "FolderTraversalCore2.EnumerateFileSystem");
             stopwatch.Start();
             TestEnumeratingFiles(FolderTraversalCore.Start(SearchPath, SearchFor.Files, true, true), "FolderTraversalCore.Start");
-
+            stopwatch.Start();
+            TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
             Console.WriteLine(new string('-', header.Length));
-            //var missing = results.Select(x => x.FullName).Except(resultsDefault.Select(x => x.FullName)).ToList();
-            //var duplicates = results.Select(x => x.FullName).GroupBy(x => x).Where(x => x.Count() > 1).Select(x => x.Key);
-            //Parallel.ForEach(missing, result =>
-            //{
-            //    Console.WriteLine(result);
-            //});
             Console.WriteLine("\n\nPress any key to exit...");
             Console.ReadKey();
 

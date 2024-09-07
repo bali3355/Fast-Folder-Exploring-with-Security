@@ -19,14 +19,14 @@ namespace FolderExplore
         #region Methods for reading files and directories from WinAPI32
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA_STRUCT lpFindFileData);
+        private static extern SafeFindHandle FindFirstFileW(string lpFileName, out WIN32_FIND_DATA lpFindFileData);
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA_STRUCT lpFindFileData);
+        private static extern bool FindNextFileW(SafeFindHandle hFindFile, out WIN32_FIND_DATA lpFindFileData);
 
-        private static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> CallEnumerateFile(string path, string searchPattern)
+        private static IEnumerable<(string path, WIN32_FIND_DATA findData)> CallEnumerateFile(string path, string searchPattern)
         {
-            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA_STRUCT _findData);
+            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA _findData);
             if (safeFindHandle.IsInvalid) yield break;
             do
             {
@@ -34,9 +34,9 @@ namespace FolderExplore
                 yield return (Path.Combine(path, _findData.cFileName), _findData);
             } while (FindNextFileW(safeFindHandle, out _findData));
         }
-        private static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> CallEnumerateDirectory(string path, string searchPattern)
+        private static IEnumerable<(string path, WIN32_FIND_DATA findData)> CallEnumerateDirectory(string path, string searchPattern)
         {
-            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA_STRUCT _findData);
+            using var safeFindHandle = FindFirstFileW(Path.Combine(path, searchPattern), out WIN32_FIND_DATA _findData);
             if (safeFindHandle.IsInvalid) yield break;
             do
             {
@@ -62,14 +62,14 @@ namespace FolderExplore
         /// <param name="path"></param>
         /// <param name="searchPattern"></param>
         /// <returns></returns>
-        public static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> EnumerateFiles(string path, string searchPattern) => CallEnumerateFile(path, searchPattern);
+        public static IEnumerable<(string path, WIN32_FIND_DATA findData)> EnumerateFiles(string path, string searchPattern) => CallEnumerateFile(path, searchPattern);
         /// <summary>
         /// Searches for subdirectories in a specified path. Leave out reparse points and stop when all files have been found.
         /// </summary>
         /// <param name="path"></param>
         /// <param name="searchPattern"></param>
         /// <returns></returns>
-        public static IEnumerable<(string path, WIN32_FIND_DATA_STRUCT findData)> EnumerateDirectory(string path, string searchPattern) => CallEnumerateDirectory(path, searchPattern);
+        public static IEnumerable<(string path, WIN32_FIND_DATA findData)> EnumerateDirectory(string path, string searchPattern) => CallEnumerateDirectory(path, searchPattern);
 
         #endregion
 
