@@ -29,14 +29,28 @@ namespace FolderExplore
             string header = $"| {"Enumerator name",-nameWidth} | {"Enumerating Time",-timeWidth} | {"Enumerated Count",-countWidth} |";
             Console.WriteLine(header);
             Console.WriteLine(new string('-', header.Length));
+            //stopwatch.Start();
+            //TestEnumeratingFiles(FolderTraversalCore.GetFiles(SearchPath), "GetFiles - Normal without anything");
             stopwatch.Start();
-            TestEnumeratingFiles(FolderTraversalCore.GetFiles(SearchPath), "GetFiles - Normal without anything");
+            var fCore2 = TestEnumeratingFiles(new List<FileSystemEntry>(FolderTraversalCore2.EnumerateFileSystem(SearchPath, "*", SearchFor.Files, -1, true, true)), "FolderTraversalCore2.EnumerateFileSystem");
+            Console.WriteLine(new string('-', header.Length));
+            Console.WriteLine($"{nameof(fCore2)} owners: \n");
+            foreach (var item in fCore2.Select(x => x.Owner).GroupBy(x => x))
+            {
+                Console.WriteLine(item.Key);
+            }
+            Console.WriteLine(new string('-', header.Length));
             stopwatch.Start();
-            TestEnumeratingFiles(FolderTraversalCore2.EnumerateFileSystem(SearchPath, "*", SearchFor.Files, -1,true,true), "FolderTraversalCore2.EnumerateFileSystem");
-            stopwatch.Start();
-            TestEnumeratingFiles(FolderTraversalCore.Start(SearchPath, SearchFor.Files, true, true), "FolderTraversalCore.Start");
-            stopwatch.Start();
-            TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
+            var fCore1 = TestEnumeratingFiles(new List<FileSystemEntry>(FolderTraversalCore.Start(SearchPath, SearchFor.Files, true, true)), "FolderTraversalCore.Start");
+            Console.WriteLine($"{nameof(fCore1)} owners: \n");
+            foreach (var item in fCore1.Select(x => x.Owner).GroupBy(x => x))
+            {
+                Console.WriteLine(item.Key);
+            }
+            Console.WriteLine(new string('-', header.Length));
+
+            //stopwatch.Start();
+            //TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
             Console.WriteLine(new string('-', header.Length));
             Console.WriteLine("\n\nPress any key to exit...");
             Console.ReadKey();

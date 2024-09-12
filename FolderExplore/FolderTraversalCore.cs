@@ -1,10 +1,6 @@
 ﻿using System.Collections.Concurrent;
-using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Security;
-using System.Security.AccessControl;
-using System.Security.Principal;
 
 namespace FolderExplore
 {
@@ -140,89 +136,17 @@ namespace FolderExplore
                     foreach (var (dirPath, dirFindData) in EnumerateDirectory(currentDirectory, "*"))
                     {
                         folderQueue.Enqueue(dirPath);
-                        if (_SearchFor != SearchFor.Files) ConcurrentResults.Enqueue(CreateFileSystemEntry(new DirectoryInfo(dirPath), dirFindData.dwFileAttributes));
+                        if (_SearchFor != SearchFor.Files) ConcurrentResults.Enqueue(SecurityCheck.CreateFileSystemEntry(new DirectoryInfo(dirPath), false, dirFindData.dwFileAttributes, IsOwner, IsInherited));
                     }
                     if (_SearchFor != SearchFor.Directories)
                     {
                         foreach (var (filePath, fileFindData) in EnumerateFiles(currentDirectory, "*"))
                         {
-                            ConcurrentResults.Enqueue(CreateFileSystemEntry(new FileInfo(filePath), fileFindData.dwFileAttributes));
+                            ConcurrentResults.Enqueue(SecurityCheck.CreateFileSystemEntry(new FileInfo(filePath), false, fileFindData.dwFileAttributes, IsOwner, IsInherited));
                         }
                     }
                 });
             return folderQueue;
         }
-
-        private static FileSystemEntry CreateFileSystemEntry(FileSystemInfo fsi, FileAttributes fileAttributes)
-        {
-            try
-            {
-                var currentAccountType = typeof(NTAccount);
-                var accessRules = GetAccessRules(fsi, currentAccountType);
-                var owner = IsOwner ? GetOwner(fsi, currentAccountType) : string.Empty;
-
-                return FileSystemEntry.Create(
-                    fsi.FullName,
-                    owner,
-                    fileAttributes,
-                    accessRules,
-                    true,
-                    string.Empty
-                );
-            }
-            catch (Exception ex)
-            {
-                return FileSystemEntry.Create(
-                    fsi.FullName,
-                    string.Empty,
-                    FileAttributes.None,
-                    ImmutableDictionary<string, FileSystemRights>.Empty,
-                    false,
-                    GetErrorType(ex)
-                );
-            }
-        }
-
-        private static ImmutableDictionary<string, FileSystemRights> GetAccessRules(FileSystemInfo fsi, Type currentAccountType)
-        {
-            var accessRules = fsi switch
-            {
-                DirectoryInfo di => di.GetAccessControl().GetAccessRules(true, IsInherited, currentAccountType),
-                FileInfo fi => fi.GetAccessControl().GetAccessRules(true, IsInherited, currentAccountType),
-                _ => null
-            };
-
-            return accessRules == null
-                ? ImmutableDictionary<string, FileSystemRights>.Empty
-                : accessRules.Cast<FileSystemAccessRule>()
-                    .ToImmutableDictionary(x => x.IdentityReference.Value, x => x.FileSystemRights);
-        }
-        public static string GetOwner(FileSystemInfo fsi, Type currentAccountType)
-        {
-            try
-            {
-                IdentityReference? owner = GetOwnerSwitch(fsi, currentAccountType);
-                return owner == null ? "Missing Owner" : owner.ToString();
-            }
-            catch (IdentityNotMappedException)
-            {
-                return "Owner Sid unrecognized";
-            }
-        }
-        private static IdentityReference? GetOwnerSwitch(FileSystemInfo fsi, Type currentAccountType) => fsi switch
-        {
-            DirectoryInfo di => di.GetAccessControl().GetOwner(currentAccountType),
-            FileInfo fi => fi.GetAccessControl().GetOwner(currentAccountType),
-            _ => null
-        };
-        private static string GetErrorType(Exception ex) => ex switch
-        {
-            UnauthorizedAccessException _ => "Authority level too low to check ACLs",
-            PathTooLongException _ => "Path too long",
-            DirectoryNotFoundException _ or FileNotFoundException _ => "Path not found",
-            IOException _ => "IO Error happened",
-            SecurityException _ => "Security error occurred",
-            _ => "Unknown Error"
-        };
     }
 }
