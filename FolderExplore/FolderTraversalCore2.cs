@@ -104,6 +104,7 @@ namespace FolderExplore
 
             public void Dispose()
             {
+                SecurityCheck.CacheClear();
                 _enumerateRunning = false;
                 _workAvailable.Set(); // Wake up any waiting threads
                 _completionEvent.Wait(TimeSpan.FromSeconds(30)); // Wait for all producers to complete

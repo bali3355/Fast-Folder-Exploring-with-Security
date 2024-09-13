@@ -21,6 +21,7 @@ namespace FolderExplore
         public SafeFindHandle() : base(true) { }
         protected override bool ReleaseHandle() => FindClose(handle);
 
+        //https://stackoverflow.com/questions/17918266/winapi-getlasterror-vs-marshal-getlastwin32error#17918729
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern bool FindClose(IntPtr hFindFile);
     }
@@ -132,15 +133,16 @@ namespace FolderExplore
 
     public static class SecurityCheck
     {
-        private static readonly ConcurrentDictionary<IntPtr, string> _sidOwnerCache = [];
+        private static ConcurrentDictionary<string, string> _sidOwnerCache { get; set; } = [];
+        public static void CacheClear() => _sidOwnerCache.Clear();
         public static FileSystemEntry CreateFileSystemEntry(FileSystemInfo fsi, bool isNative, FileAttributes fileAttributes, bool isOwner, bool isInherited)
         {
             try
             {
                 var currentAccountType = typeof(NTAccount);
                 var accessRules = GetAccessRules(fsi, currentAccountType, isInherited);
-                var owner = isOwner ? isNative ? NativeGetOwner(fsi,currentAccountType) : GetOwner(fsi, currentAccountType) : string.Empty;
-                //if (owner.Contains("SZOLG")) Console.WriteLine(fsi.FullName + " | " + owner);
+                var owner = isOwner ? isNative ? NativeGetOwner(fsi, currentAccountType) : GetOwner(fsi, currentAccountType) : string.Empty;
+
                 return FileSystemEntry.Create(
                     fsi.FullName,
                     owner,
@@ -187,11 +189,11 @@ namespace FolderExplore
                 var owner = HandleFileSystemInfo(fsi,
                     di => di.GetAccessControl().GetOwner(currentAccountType),
                     fi => fi.GetAccessControl().GetOwner(currentAccountType));
-                return owner == null ? "Missing Owner" : owner.ToString();
+                return owner == null ? "Missing Owner" : owner.Value;
             }
-            catch (IdentityNotMappedException)
+            catch (IdentityNotMappedException ex)
             {
-                return "Owner Sid unrecognized";
+                return $"Owner Sid unrecognized: {ex.Message}";
             }
         }
         private static string GetErrorType(Exception ex) => ex switch
@@ -206,19 +208,31 @@ namespace FolderExplore
 
         public static string NativeGetOwner(FileSystemInfo path, Type currentAccountType)
         {
+            //It's set to 0x00000001, which corresponds to OWNER_SECURITY_INFORMATION.
             NativeWinAPI.GetFileSecurity(path.FullName, 0x00000001, IntPtr.Zero, 0, out uint length);
 
             IntPtr securityDescriptor = Marshal.AllocHGlobal((int)length);
             try
             {
-                if (!NativeWinAPI.GetFileSecurity(path.FullName, 0x00000001, securityDescriptor, length, out _))
-                    return GetOwner(path, currentAccountType);
-                if (!NativeWinAPI.GetSecurityDescriptorOwner(securityDescriptor, out IntPtr ownerSid, out _)) 
-                    return "Unknown Owner, unable to get Owner SID";
+                if (!NativeWinAPI.GetFileSecurity(path.FullName, 0x00000001, securityDescriptor, length, out _)) 
+                    throw new SecurityException($"No access (Error Code: {Marshal.GetLastWin32Error()}) to path: {path.FullName}");
+
+                if (!NativeWinAPI.GetSecurityDescriptorOwner(securityDescriptor, out IntPtr ownerSid, out _))
+                    throw new SecurityException($"Unknown Owner (Error code: {Marshal.GetLastWin32Error()}), unable to get Owner SID: {path.FullName}");
+
                 return TranslateSidToAccountName(ownerSid);
             }
-            catch
+            catch (SecurityException SEx)
             {
+                var lastError = Marshal.GetLastWin32Error();
+                Debug.WriteLine("Trying GetAccessControl.GetOwner");
+                var fallbackGetOwner = GetOwner(path, currentAccountType);
+                if (!string.IsNullOrEmpty(fallbackGetOwner) || !fallbackGetOwner.StartsWith("Owner")) return fallbackGetOwner;
+                else return SEx.Message;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(path.FullName + " : " + ex.Message);
                 return "Unknown Owner, unable to get Owner SID";
             }
             finally
@@ -227,49 +241,44 @@ namespace FolderExplore
             }
         }
 
-        private static string TranslateSidToAccountName(IntPtr ownerSid)
-        {
-            if (_sidOwnerCache.TryGetValue(ownerSid, out string accountName)) return accountName;
-            else
-            {
-                accountName = GetSidToAccountName(ownerSid);
-                _sidOwnerCache.TryAdd(ownerSid, accountName);
-                return accountName;
-            }
-        }
+        private static string TranslateSidToAccountName(IntPtr ownerSid) => GetSidToAccountName(ownerSid);
 
         private static string GetSidToAccountName(nint ownerSid)
         {
+            var AccountToStringSID = ConvertToAccount(ownerSid);
             try
             {
+                if (_sidOwnerCache.TryGetValue(AccountToStringSID, out string Account)) return Account;
+
                 uint nameLength = 0;
                 uint domainLength = 0;
                 // First call to get required buffer sizes
                 NativeWinAPI.LookupAccountSid(null, ownerSid, null, ref nameLength, null, ref domainLength, out int sidUse);
 
-                if (nameLength == 0 && domainLength == 0) return ConvertToAccount(ownerSid);
+                if (nameLength == 0 && domainLength == 0) return AccountToStringSID;
 
 
                 StringBuilder name = new((int)nameLength);
                 StringBuilder domain = new((int)domainLength);
 
+                //Load the account into buffered pointers
                 if (NativeWinAPI.LookupAccountSid(null, ownerSid, name, ref nameLength, domain, ref domainLength, out sidUse))
                 {
-                    if (domain.Length > 0) return $"{domain}\\{name}";
-                    else return name.ToString();
+                    var resultAccount = domain.Length > 0 ? $"{domain}\\{name}" : name.ToString();
+                    _sidOwnerCache.TryAdd(AccountToStringSID, resultAccount);
+                    return resultAccount;
                 }
+                else return AccountToStringSID;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine(ex);
+                return AccountToStringSID;
             }
-            return ConvertToAccount(ownerSid);
         }
 
-        private static string ConvertToAccount(IntPtr ownerSid)
-        {
-            if (NativeWinAPI.ConvertSidToStringSid(ownerSid, out string accountSid)) return accountSid;
-            return "Unknown Owner, unable to convert owner SID to string";
-        }
+        private static string ConvertToAccount(IntPtr ownerSid) => NativeWinAPI.ConvertSidToStringSid(ownerSid, out string accountSid)
+                ? accountSid
+                : "Unknown Owner, unable to convert owner SID to string";
     }
 }

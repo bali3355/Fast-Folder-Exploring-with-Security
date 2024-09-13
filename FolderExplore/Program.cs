@@ -32,23 +32,40 @@ namespace FolderExplore
             //stopwatch.Start();
             //TestEnumeratingFiles(FolderTraversalCore.GetFiles(SearchPath), "GetFiles - Normal without anything");
             stopwatch.Start();
-            var fCore2 = TestEnumeratingFiles(new List<FileSystemEntry>(FolderTraversalCore2.EnumerateFileSystem(SearchPath, "*", SearchFor.Files, -1, true, true)), "FolderTraversalCore2.EnumerateFileSystem");
-            Console.WriteLine(new string('-', header.Length));
-            Console.WriteLine($"{nameof(fCore2)} owners: \n");
-            foreach (var item in fCore2.Select(x => x.Owner).GroupBy(x => x))
-            {
-                Console.WriteLine(item.Key);
-            }
-            Console.WriteLine(new string('-', header.Length));
+            var fCore2 = FolderTraversalCore2.EnumerateFileSystem(SearchPath, "*", SearchFor.Files, -1, true, true).ToList();
+            TestEnumeratingFiles(fCore2, "FolderTraversalCore2.EnumerateFileSystem");
             stopwatch.Start();
-            var fCore1 = TestEnumeratingFiles(new List<FileSystemEntry>(FolderTraversalCore.Start(SearchPath, SearchFor.Files, true, true)), "FolderTraversalCore.Start");
-            Console.WriteLine($"{nameof(fCore1)} owners: \n");
-            foreach (var item in fCore1.Select(x => x.Owner).GroupBy(x => x))
-            {
-                Console.WriteLine(item.Key);
-            }
+            var fCore1 = FolderTraversalCore.Start(SearchPath, SearchFor.Files, true, true).ToList();
+            TestEnumeratingFiles(fCore1, "FolderTraversalCore.Start");
             Console.WriteLine(new string('-', header.Length));
+            Console.WriteLine($"{nameof(fCore1) + " owners",-nameWidth}");
 
+            var owners1 = fCore1.Select(x => x.Owner).GroupBy(x=> x).Distinct().Select(x=> x.Key).ToList();
+            foreach (var item in owners1)
+            {
+                Console.WriteLine($"{item,-nameWidth}");
+            }
+            var CheckedOwners = fCore1.Join(fCore2,
+                                            a => a.Path,
+                                            b => b.Path,
+                                            static (a, b) => new
+                                            {
+                                                a.Path,
+                                                OwnerA = a.Owner,
+                                                OwnerB = b.Owner
+                                            })
+                                            .Where(x => x.OwnerA != x.OwnerB)
+                                            .Select(x => new
+                                            {
+                                                x.Path,
+                                                Owner = $"{x.OwnerA} | {x.OwnerB}"
+                                            })
+                                            .ToList();
+            foreach (var item in CheckedOwners)
+            {
+                Console.WriteLine($"{item.Path,-nameWidth} : {item.Owner,-nameWidth}");
+
+            }
             //stopwatch.Start();
             //TestEnumeratingFiles(FolderExplore.Explore(SearchPath, true, true), "Folder.EnumerateFiles");
             Console.WriteLine(new string('-', header.Length));
