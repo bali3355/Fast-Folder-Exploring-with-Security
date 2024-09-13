@@ -214,7 +214,7 @@ namespace FolderExplore
             IntPtr securityDescriptor = Marshal.AllocHGlobal((int)length);
             try
             {
-                if (!NativeWinAPI.GetFileSecurity(path.FullName, 0x00000001, securityDescriptor, length, out _)) 
+                if (!NativeWinAPI.GetFileSecurity(path.FullName, 0x00000001, securityDescriptor, length, out _))
                     throw new SecurityException($"No access (Error Code: {Marshal.GetLastWin32Error()}) to path: {path.FullName}");
 
                 if (!NativeWinAPI.GetSecurityDescriptorOwner(securityDescriptor, out IntPtr ownerSid, out _))
@@ -255,7 +255,11 @@ namespace FolderExplore
                 // First call to get required buffer sizes
                 NativeWinAPI.LookupAccountSid(null, ownerSid, null, ref nameLength, null, ref domainLength, out int sidUse);
 
-                if (nameLength == 0 && domainLength == 0) return AccountToStringSID;
+                if (nameLength == 0 && domainLength == 0)
+                {
+                    _sidOwnerCache.TryAdd(AccountToStringSID, AccountToStringSID);
+                    return AccountToStringSID;
+                }
 
 
                 StringBuilder name = new((int)nameLength);
@@ -268,7 +272,11 @@ namespace FolderExplore
                     _sidOwnerCache.TryAdd(AccountToStringSID, resultAccount);
                     return resultAccount;
                 }
-                else return AccountToStringSID;
+                else
+                {
+                    _sidOwnerCache.TryAdd(AccountToStringSID, AccountToStringSID);
+                    return AccountToStringSID;
+                }
             }
             catch (Exception ex)
             {
