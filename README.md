@@ -1,4 +1,5 @@
 # Fast Folder Exploring with Security
+![result](https://github.com/user-attachments/assets/9455ebc5-83b4-43ca-977a-5a61ed509186)
 
 This compact file will search efficiently in remote or local drives, and give back result based on search parameters:
 - Path
