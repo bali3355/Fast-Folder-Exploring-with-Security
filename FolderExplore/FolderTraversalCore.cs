@@ -136,13 +136,13 @@ namespace FolderExplore
                     foreach (var (dirPath, dirFindData) in EnumerateDirectory(currentDirectory, "*"))
                     {
                         folderQueue.Enqueue(dirPath);
-                        if (_SearchFor != SearchFor.Files) ConcurrentResults.Enqueue(SecurityCheck.CreateFileSystemEntry(new DirectoryInfo(dirPath), false, dirFindData.dwFileAttributes, IsOwner, IsInherited));
+                        if (_SearchFor != SearchFor.Files) ConcurrentResults.Enqueue(SecurityCheck.CreateFileSystemEntry(new DirectoryInfo(dirPath), true, dirFindData.dwFileAttributes, IsOwner, IsInherited));
                     }
                     if (_SearchFor != SearchFor.Directories)
                     {
                         foreach (var (filePath, fileFindData) in EnumerateFiles(currentDirectory, "*"))
                         {
-                            ConcurrentResults.Enqueue(SecurityCheck.CreateFileSystemEntry(new FileInfo(filePath), false, fileFindData.dwFileAttributes, IsOwner, IsInherited));
+                            ConcurrentResults.Enqueue(SecurityCheck.CreateFileSystemEntry(new FileInfo(filePath), true, fileFindData.dwFileAttributes, IsOwner, IsInherited));
                         }
                     }
                 });
